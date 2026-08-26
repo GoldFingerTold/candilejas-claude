@@ -52,7 +52,7 @@ const DEFAULT_CONTENT = {
   nav_empresariales_label: 'Eventos Empresariales',
   nav_contacto_label: 'Contacto',
 
-  banner_image: '',
+  banner_image: '/img/seed/banner.jpg',
   banner_title: 'Eventos Candilejas',
   banner_subtitle: 'Organización integral de eventos sociales y empresariales, a tu medida.',
 
@@ -109,6 +109,17 @@ const DEFAULT_CONTENT = {
   pdf_url: ''
 };
 
+// Fotos reales del sitio actual de Eventos Candilejas, cargadas a pedido de Hugo para
+// que la demo no se vea vacía ("sin fotos no dice nada") - se van a reemplazar por fotos
+// propias del cliente más adelante.
+const DEFAULT_GALLERY = [
+  { url: '/img/seed/galeria-1.jpg', alt_text: 'Brindis en un evento' },
+  { url: '/img/seed/galeria-2.jpg', alt_text: 'Encuentro social' },
+  { url: '/img/seed/galeria-3-empresariales.jpg', alt_text: 'Evento empresarial' },
+  { url: '/img/seed/galeria-4-servicios.jpg', alt_text: 'Servicio de catering' },
+  { url: '/img/seed/galeria-5-sociales.jpg', alt_text: 'Evento social' }
+];
+
 const DEFAULT_SOCIAL = [];
 
 async function seedIfEmpty() {
@@ -123,6 +134,13 @@ async function seedIfEmpty() {
     if (Object.keys(missing).length > 0) {
       await db.collection('content').updateOne({ _id: 'main' }, { $set: missing });
     }
+  }
+
+  const galleryCount = await db.collection('gallery_images').countDocuments();
+  if (galleryCount === 0) {
+    await db.collection('gallery_images').insertMany(
+      DEFAULT_GALLERY.map((item, i) => ({ ...item, position: i }))
+    );
   }
 
   const socialCount = await db.collection('social_links').countDocuments();
