@@ -1,0 +1,223 @@
+// Rutas protegidas del panel: editar textos (incluido Próximo Evento), subir/borrar/
+// reordenar fotos de la galería, gestionar redes sociales y ver los mensajes de
+// contacto. Se montan detrás de auth.requireAdmin en index.js.
+
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+const db = require('../db');
+const asyncHandler = require('../asyncHandler');
+const { ObjectId } = require('mongodb');
+
+const router = express.Router();
+
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+    const name = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    cb(null, name);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_TYPES.has(file.mimetype)) {
+      return cb(new Error('Formato de imagen no soportado. Usá JPG, PNG, WEBP o GIF.'));
+    }
+    cb(null, true);
+  }
+});
+
+function withMulterErrors(field) {
+  const mw = upload.single(field);
+  return (req, res, next) => {
+    mw(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  };
+}
+
+// ---------- Textos (incluye Próximo Evento) ----------
+
+router.get('/content', asyncHandler(async (req, res) => {
+  const contentDoc = await db.getDb().collection('content').findOne({ _id: 'main' });
+  const { _id, ...content } = contentDoc || {};
+  res.json({ content });
+}));
+
+router.put('/content', asyncHandler(async (req, res) => {
+  const updates = req.body || {};
+  const keys = Object.keys(updates);
+  if (keys.length === 0) return res.status(400).json({ error: 'No hay campos para actualizar.' });
+
+  const clean = {};
+  for (const key of keys) clean[key] = String(updates[key] ?? '');
+
+  await db.getDb().collection('content').updateOne({ _id: 'main' }, { $set: clean }, { upsert: true });
+
+  res.json({ ok: true });
+}));
+
+// Reemplazar una imagen fija del contenido (ej: proximo_evento_image), o subir una
+// imagen suelta y devolver su URL para usarla donde haga falta.
+router.post('/content/image', withMulterErrors('image'), asyncHandler(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
+  const url = `/uploads/${req.file.filename}`;
+
+  const { key } = req.body || {};
+  if (key) {
+    await db.getDb().collection('content').updateOne({ _id: 'main' }, { $set: { [key]: url } }, { upsert: true });
+  }
+
+  res.json({ ok: true, url });
+}));
+
+// ---------- Galería ----------
+
+router.get('/gallery', asyncHandler(async (req, res) => {
+  const items = await db.getDb().collection('gallery_images').find().sort({ position: 1, _id: 1 }).toArray();
+  res.json({ items: items.map(({ _id, url, alt_text, position }) => ({ id: _id, url, alt: alt_text, position })) });
+}));
+
+router.post('/gallery', withMulterErrors('image'), asyncHandler(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
+  const url = `/uploads/${req.file.filename}`;
+  const alt = (req.body && req.body.alt) || '';
+
+  const mongo = db.getDb();
+  const last = await mongo.collection('gallery_images').find().sort({ position: -1 }).limit(1).toArray();
+  const nextPos = last.length > 0 ? last[0].position + 1 : 0;
+
+  const result = await mongo.collection('gallery_images').insertOne({ url, alt_text: alt, position: nextPos });
+
+  res.json({ ok: true, id: result.insertedId, url });
+}));
+
+router.delete('/gallery/:id', asyncHandler(async (req, res) => {
+  const mongo = db.getDb();
+  const row = await mongo.collection('gallery_images').findOne({ _id: new ObjectId(req.params.id) });
+  if (!row) return res.status(404).json({ error: 'No existe esa imagen.' });
+
+  await mongo.collection('gallery_images').deleteOne({ _id: row._id });
+
+  if (row.url.startsWith('/uploads/')) {
+    const filePath = path.join(UPLOAD_DIR, path.basename(row.url));
+    fs.unlink(filePath, () => {});
+  }
+
+  res.json({ ok: true });
+}));
+
+router.put('/gallery/reorder', asyncHandler(async (req, res) => {
+  const { order } = req.body || {};
+  if (!Array.isArray(order)) return res.status(400).json({ error: 'Falta el array "order".' });
+
+  const ops = order.map((id, index) => ({
+    updateOne: { filter: { _id: new ObjectId(id) }, update: { $set: { position: index } } }
+  }));
+  if (ops.length > 0) await db.getDb().collection('gallery_images').bulkWrite(ops);
+
+  res.json({ ok: true });
+}));
+
+// ---------- Redes sociales ----------
+
+router.get('/social', asyncHandler(async (req, res) => {
+  const items = await db.getDb().collection('social_links').find().sort({ position: 1, _id: 1 }).toArray();
+  res.json({ items: items.map(({ _id, platform, label, url, visible, position }) => ({ id: _id, platform, label, url, visible, position })) });
+}));
+
+router.post('/social', asyncHandler(async (req, res) => {
+  const { platform, label, url } = req.body || {};
+  if (!platform || !label || !url) {
+    return res.status(400).json({ error: 'Faltan datos (plataforma, etiqueta o URL).' });
+  }
+
+  const mongo = db.getDb();
+  const last = await mongo.collection('social_links').find().sort({ position: -1 }).limit(1).toArray();
+  const nextPos = last.length > 0 ? last[0].position + 1 : 0;
+
+  const result = await mongo.collection('social_links').insertOne({
+    platform: platform.trim(),
+    label: label.trim(),
+    url: url.trim(),
+    visible: true,
+    position: nextPos
+  });
+
+  res.json({ ok: true, id: result.insertedId });
+}));
+
+// IMPORTANTE: "reorder" tiene que registrarse ANTES que "/:id" - si no, Express matchea
+// "reorder" como si fuera el valor de :id.
+router.put('/social/reorder', asyncHandler(async (req, res) => {
+  const { order } = req.body || {};
+  if (!Array.isArray(order)) return res.status(400).json({ error: 'Falta el array "order".' });
+
+  const ops = order.map((id, index) => ({
+    updateOne: { filter: { _id: new ObjectId(id) }, update: { $set: { position: index } } }
+  }));
+  if (ops.length > 0) await db.getDb().collection('social_links').bulkWrite(ops);
+
+  res.json({ ok: true });
+}));
+
+router.put('/social/:id', asyncHandler(async (req, res) => {
+  const mongo = db.getDb();
+  const row = await mongo.collection('social_links').findOne({ _id: new ObjectId(req.params.id) });
+  if (!row) return res.status(404).json({ error: 'No existe esa red.' });
+
+  const { platform, label, url, visible } = req.body || {};
+  await mongo.collection('social_links').updateOne(
+    { _id: row._id },
+    {
+      $set: {
+        platform: platform ?? row.platform,
+        label: label ?? row.label,
+        url: url ?? row.url,
+        visible: visible === undefined ? row.visible : Boolean(visible)
+      }
+    }
+  );
+  res.json({ ok: true });
+}));
+
+router.delete('/social/:id', asyncHandler(async (req, res) => {
+  const result = await db.getDb().collection('social_links').deleteOne({ _id: new ObjectId(req.params.id) });
+  if (result.deletedCount === 0) return res.status(404).json({ error: 'No existe esa red.' });
+  res.json({ ok: true });
+}));
+
+// ---------- Mensajes de contacto ----------
+
+router.get('/messages', asyncHandler(async (req, res) => {
+  const items = await db.getDb().collection('contact_messages').find().sort({ created_at: -1 }).toArray();
+  res.json({ items: items.map(({ _id, name, email, phone, message, created_at, is_read }) => ({ id: _id, name, email, phone, message, created_at, is_read })) });
+}));
+
+router.put('/messages/:id/read', asyncHandler(async (req, res) => {
+  const result = await db.getDb().collection('contact_messages').updateOne(
+    { _id: new ObjectId(req.params.id) },
+    { $set: { is_read: true } }
+  );
+  if (result.matchedCount === 0) return res.status(404).json({ error: 'No existe ese mensaje.' });
+  res.json({ ok: true });
+}));
+
+router.delete('/messages/:id', asyncHandler(async (req, res) => {
+  const result = await db.getDb().collection('contact_messages').deleteOne({ _id: new ObjectId(req.params.id) });
+  if (result.deletedCount === 0) return res.status(404).json({ error: 'No existe ese mensaje.' });
+  res.json({ ok: true });
+}));
+
+module.exports = router;
