@@ -168,6 +168,11 @@ h1, h2, h3 { font-family: var(--font-display); font-weight: 400; line-height: 1.
    (queda prolijo igual); en cuanto se sube una imagen real, la tapa por completo. */
 .hero {
   position: relative;
+  /* z-index (aunque sea 0) es lo que hace que .hero cree su propio contexto de
+     apilamiento - sin esto, el z-index:-1 de .hero-media se escapa al contexto raíz
+     de la página entera, y el fondo de acá abajo termina pintándose ARRIBA de la
+     foto en vez de detrás. */
+  z-index: 0;
   min-height: 90vh;
   display: flex;
   align-items: flex-end;
