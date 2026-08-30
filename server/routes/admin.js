@@ -3,31 +3,18 @@
 // contacto. Se montan detrás de auth.requireAdmin en index.js.
 
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
 const db = require('../db');
 const asyncHandler = require('../asyncHandler');
 const { ObjectId } = require('mongodb');
+const { uploadBuffer } = require('../cloudinary');
 
 const router = express.Router();
 
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
-    const name = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, name);
-  }
-});
-
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
   fileFilter: (req, file, cb) => {
     if (!ALLOWED_TYPES.has(file.mimetype)) {
@@ -72,7 +59,8 @@ router.put('/content', asyncHandler(async (req, res) => {
 // imagen suelta y devolver su URL para usarla donde haga falta.
 router.post('/content/image', withMulterErrors('image'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
-  const url = `/uploads/${req.file.filename}`;
+  const cloudResult = await uploadBuffer(req.file.buffer, 'candilejas/content');
+  const url = cloudResult.secure_url;
 
   const { key } = req.body || {};
   if (key) {
@@ -91,16 +79,17 @@ router.get('/gallery', asyncHandler(async (req, res) => {
 
 router.post('/gallery', withMulterErrors('image'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No se recibió ninguna imagen.' });
-  const url = `/uploads/${req.file.filename}`;
+  const cloudResult = await uploadBuffer(req.file.buffer, 'candilejas/gallery');
+  const url = cloudResult.secure_url;
   const alt = (req.body && req.body.alt) || '';
 
   const mongo = db.getDb();
   const last = await mongo.collection('gallery_images').find().sort({ position: -1 }).limit(1).toArray();
   const nextPos = last.length > 0 ? last[0].position + 1 : 0;
 
-  const result = await mongo.collection('gallery_images').insertOne({ url, alt_text: alt, position: nextPos });
+  const inserted = await mongo.collection('gallery_images').insertOne({ url, alt_text: alt, position: nextPos });
 
-  res.json({ ok: true, id: result.insertedId, url });
+  res.json({ ok: true, id: inserted.insertedId, url });
 }));
 
 router.delete('/gallery/:id', asyncHandler(async (req, res) => {
@@ -110,10 +99,8 @@ router.delete('/gallery/:id', asyncHandler(async (req, res) => {
 
   await mongo.collection('gallery_images').deleteOne({ _id: row._id });
 
-  if (row.url.startsWith('/uploads/')) {
-    const filePath = path.join(UPLOAD_DIR, path.basename(row.url));
-    fs.unlink(filePath, () => {});
-  }
+  // Nota: la imagen queda huérfana en Cloudinary (no se borra desde acá) - a esta escala
+  // no representa un costo real (plan gratis de 25GB).
 
   res.json({ ok: true });
 }));
