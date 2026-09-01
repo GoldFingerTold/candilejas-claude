@@ -62,6 +62,7 @@ const DEFAULT_CONTENT = {
   proximo_evento_media_type: 'image',
   proximo_evento_image: '',
   proximo_evento_video_url: '',
+  proximo_evento_vertical: '0',
 
   nosotros_heading: 'Quiénes Somos',
   nosotros_text: [
